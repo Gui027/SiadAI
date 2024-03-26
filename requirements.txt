@@ -1,3 +1,4 @@
 streamlit
-pandasai
+pandas==1.5.3
+pandasai==1.4.1
 python-dotenv

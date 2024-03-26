@@ -1,104 +1,116 @@
 import streamlit as st
+from flask import Flask, request, jsonify
 import pandas as pd
 import requests
-from dotenv import load_dotenv
-import os
 from pandasai.llm.openai import OpenAI
 from pandasai import PandasAI
-import re
-
-# Carrega as variáveis de ambiente do arquivo .env para o script.
-load_dotenv()
+import os
 
 # Obtém a chave de API da OpenAI a partir das variáveis de ambiente.
 openai_api_key = os.getenv("OPENAI_API_KEY")
 
+app = Flask(__name__)
+
+# Define uma função para interagir com um DataFrame e um prompt de texto usando inteligência artificial.
 def chat_with_data(df, prompt):
+    prompt_in_portuguese = "Responda em português: " + prompt
+    llm = OpenAI(api_token=openai_api_key)
+    pandas_ai = PandasAI(llm)
+    result = pandas_ai.run(df, prompt=prompt_in_portuguese)
+    return result
+
+def json_to_dataframe(data, prefix=''):
+    def flatten_json(y, prefix=''):
+        out = {}
+        def flatten(x, name=''):
+            if isinstance(x, dict):
+                for a in x:
+                    flatten(x[a], name + a + '_')
+            elif isinstance(x, list):
+                i = 0
+                for a in x:
+                    flatten(a, name + str(i) + '_')
+                    i += 1
+            else:
+                out[name[:-1]] = x
+        flatten(y)
+        return out
+
+    flat_data = flatten_json(data)
+    return pd.DataFrame([flat_data])
+
+def fetch_data(cnpj, email):
+    empresa = "5"  # Assumindo que o código da empresa é sempre 5, ajuste conforme necessário
+    base_url = f"https://fjinfor.ddns.net/fvendas/api/api_busca_cli.php?funcao=get_buscacli&empresa={empresa}&cnpj={cnpj}&email={email}"
     
-    # Lista de expressões que indicam uma pergunta sobre o nome do assistente
-    nome_keywords = ["nome", "quem", "com quem", "falo", "estou falando", "estou conversando", "se chama"]
-    
-    # Verifica se alguma das palavras-chave está na pergunta
-    if any(keyword in prompt.lower() for keyword in nome_keywords):
-        # Responde diretamente com o nome do assistente se a pergunta estiver relacionada
-        return "Olá, meu nome é Carlos! Sou a Inteligência Artificial da Unimarka, Como posso te ajudar?"
-    
-    if df.empty or df.isnull().all().any():
-        return "Não há dados suficientes para responder à consulta."
     try:
-        prompt_in_portuguese = "Responda em português: " + prompt
-        llm = OpenAI(api_token=openai_api_key)
-        pandas_ai = PandasAI(llm)
-        result = pandas_ai.run(df, prompt=prompt_in_portuguese)
-        result_str = str(result).strip()
-        if result_str == 'nan' or result_str.lower() == 'none':
-            return "Não foi possível encontrar uma resposta adequada com os dados fornecidos."
-        if result_str == "":
-            return "Desculpe, não consegui encontrar uma resposta."
-        
-        # Novo código para detectar URLs e torná-los clicáveis
-        url_pattern = r'(https?://[^\s]+)'
-        result_str = re.sub(url_pattern, r'<a href="\1" target="_blank">\1</a>', result_str)
-        
-        return result_str
-    except Exception as e:
-        return f"Ocorreu um erro ao processar a consulta: {str(e)}"
+        response = requests.get(base_url)
+        response.raise_for_status()
+        data_json = response.json()
+        cliente_id = data_json['dados'][0]['id'] if data_json['dados'] else None
+        if cliente_id:
+            # Constrói a segunda URL com o ID do cliente obtido
+            detalhe_url = f"https://fjinfor.ddns.net/fvendas/api/api_sitpedido.php?funcao=get_sitpedido&cliente={cliente_id}"
+            response_detalhe = requests.get(detalhe_url)
+            response_detalhe.raise_for_status()
+            detalhe_data_json = response_detalhe.json()
+            df = json_to_dataframe(detalhe_data_json)
+            return df
+        else:
+            st.error("Cliente não encontrado. Verifique o CNPJ e o e-mail fornecidos.")
+            return pd.DataFrame()
+    except requests.RequestException as e:
+        st.error(f"Erro ao buscar dados da API. Erro: {e}")
+        return pd.DataFrame()
 
-def fetch_data(api_url1, api_url2):
-    dfs = []
-    for api_url in [api_url1, api_url2]:
-        try:
-            response = requests.get(api_url)
-            response.raise_for_status()
-            data = response.json().get('dados')
-            if data:
-                dfs.append(pd.DataFrame(data))
-        except requests.RequestException:
-            pass
-    return dfs
-
-def display_chat_message(sender, message):
-    if sender == "Você":
-        st.markdown(f"<div style='text-align: right; border-radius: 25px; background-color: #DCF8C6; padding: 10px; margin: 10px 0px 10px 40%; display: inline-block; max-width: 60%;'>{message}</div>", unsafe_allow_html=True)
-    else:  # Mensagens do Siad.AI
-        st.markdown(f"""<div style='text-align: left; border-radius: 25px; background-color: #ECECEC; padding: 10px; margin: 10px 40% 10px 0px; display: flex; align-items: center; max-width: 60%;'>
-                            <img src='https://lifeapps.com.br/wp-content/uploads/2021/07/unimarka.png' style='width: 40px; height: 40px; border-radius: 50%; margin-right: 10px;'>
-                            {message}
-                        </div>""", unsafe_allow_html=True)
-
-def on_text_enter():
-    input_text = st.session_state.query_input
-    if not data_list:
-        st.session_state.conversation.append(("Você", input_text))
-        st.session_state.conversation.append(("Siad.AI", "Não foi possível carregar dados das APIs. Tente novamente mais tarde."))
-    else:
-        combined_data = pd.concat(data_list, ignore_index=True)
-        response = chat_with_data(combined_data, input_text)
-        st.session_state.conversation.append(("Você", input_text))
-        st.session_state.conversation.append(("Siad.AI", response))
-    # Limpa o campo de entrada após o envio
-    st.session_state.query_input = ""
+@app.route('/chat_with_data', methods=['POST'])
+def api_chat_with_data():
+    content = request.json
+    cnpj = content.get('cnpj')
+    email = content.get('email')
+    prompt = content.get('prompt')
+    
+    df = fetch_data(cnpj, email)
+    if df.empty:
+        return jsonify({"error": "Nenhum dado encontrado para o cliente especificado"}), 404
+    
+    result = chat_with_data(df, prompt)
+    return jsonify({"response": result})
 
 # Configuração da página do Streamlit
-st.set_page_config(page_title="Siad.AI Chat", layout='wide')
-st.title("Bem-vindo ao Siad.AI Chat")
+st.set_page_config(layout='wide')
+st.title("Siad.AI Chat")
 
-# URLs das APIs
-api_url1 = "https://fjinfor.ddns.net/fvendas/api/api_sitpedido.php?funcao=get_sitpedido&cliente=1010"
-api_url2 = "https://fjinfor.ddns.net/fvendas/api/api_sit_boleto.php?funcao=get_sitboleto&cliente=1010"
+# Iniciar chat
+if 'dados_enviados' not in st.session_state:
+    st.session_state.dados_enviados = False
 
-# Carregando dados das APIs
-data_list = fetch_data(api_url1, api_url2)
+if not st.session_state.dados_enviados:
+    cnpj = st.text_input("Favor informar seu CNPJ:", key="cnpj_input")
+    email = st.text_input("Favor informar seu email:", key="email_input")
 
-# Armazenando conversa
-if 'conversation' not in st.session_state:
-    st.session_state.conversation = []
+    if st.button("Enviar Dados"):
+        st.session_state.dados_enviados = True
+        st.session_state.cnpj = cnpj
+        st.session_state.email = email
 
-# Interface de chat
-st.subheader("Como posso ajudar?")
-# A função on_change é chamada automaticamente ao pressionar Enter ou ao alterar o texto
-st.text_input("Digite sua consulta aqui...", key="query_input", on_change=on_text_enter, args=())
+if st.session_state.dados_enviados:
+    # Carregando dados das APIs
+    data = fetch_data(st.session_state.cnpj, st.session_state.email)
 
-# Exibindo conversa
-for sender, message in st.session_state.conversation:
-    display_chat_message(sender, message)
+    if not data.empty:
+        st.info("Dados carregados das APIs")
+        st.dataframe(data, use_container_width=True)
+
+        input_text = st.text_area("Digite sua consulta", key="consulta")
+        if input_text:
+            if st.button("Buscar Dados", key="buscar"):
+                st.info(f"Sua consulta: {input_text}")
+                result = chat_with_data(data, input_text)
+                st.success(result)
+    else:
+        st.error("Não foi possível carregar dados das APIs. Verifique as URLs e tente novamente.")
+        
+
+if __name__ == '__main__':
+    app.run(debug=True, use_reloader=False)
